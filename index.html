@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CCTV Monitor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d0d0d;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px;
+      background: #1a1a1a;
+      border-bottom: 1px solid #2a2a2a;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 0.95rem; font-weight: 500; letter-spacing: 1px; }
+
+    .badge {
+      font-size: 0.72rem; padding: 2px 8px;
+      border-radius: 10px; background: #2a2a2a; color: #888;
+    }
+    .badge.live { background: #0a2a0a; color: #4caf50; }
+    .badge.err  { background: #2a0a0a; color: #f44336; }
+    #ws-badge { margin-left: auto; }
+
+    .main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+      gap: 1px;
+      background: #222;
+    }
+
+    /* ── 영상 영역 ── */
+    .video-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #111;
+      position: relative;
+    }
+
+    canvas#screen {
+      max-width: 100%;
+      max-height: 100%;
+      display: block;
+    }
+
+    #no-signal {
+      position: absolute;
+      color: #444;
+      font-size: 0.85rem;
+    }
+
+    /* ── 이벤트 패널 ── */
+    .event-panel {
+      width: 260px;
+      background: #111;
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid #2a2a2a;
+      flex-shrink: 0;
+    }
+    .event-panel h2 {
+      font-size: 0.75rem; font-weight: 500;
+      color: #666; padding: 8px 12px;
+      border-bottom: 1px solid #1e1e1e;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+
+    #event-log { flex: 1; overflow-y: auto; padding: 4px 0; }
+
+    .ev {
+      padding: 6px 12px;
+      border-bottom: 1px solid #1a1a1a;
+      font-size: 0.75rem; line-height: 1.4;
+    }
+    .ev .time { color: #444; font-size: 0.68rem; margin-top: 1px; }
+    .ev.motion  { border-left: 2px solid #ff9800; }
+    .ev.offline { border-left: 2px solid #f44336; }
+    .ev.online  { border-left: 2px solid #4caf50; }
+
+    #event-log::-webkit-scrollbar { width: 3px; }
+    #event-log::-webkit-scrollbar-thumb { background: #333; }
+
+    /* ── 하단 통계 바 ── */
+    .stat-bar {
+      display: flex; gap: 16px;
+      padding: 5px 16px;
+      background: #1a1a1a;
+      border-top: 1px solid #2a2a2a;
+      font-size: 0.72rem; color: #555;
+      flex-shrink: 0;
+    }
+    .stat-bar span b { color: #888; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>CCTV Monitor</h1>
+  <span class="badge" id="cam-badge">카메라 —</span>
+  <span class="badge" id="ws-badge">연결 중...</span>
+</header>
+
+<div class="main">
+  <div class="video-wrap">
+    <span id="no-signal">신호 없음</span>
+    <canvas id="screen" width="640" height="480"></canvas>
+  </div>
+
+  <div class="event-panel">
+    <h2>Event Log</h2>
+    <div id="event-log"></div>
+  </div>
+</div>
+
+<div class="stat-bar">
+  <span>FPS: <b id="fps-val">—</b></span>
+  <span>프레임: <b id="frame-cnt">0</b></span>
+  <span>크기: <b id="frame-size">—</b></span>
+  <span>지연: <b id="latency">—</b></span>
+</div>
+
+<script>
+const WS_URL = `ws://${location.hostname}:8765`;
+
+const canvas   = document.getElementById('screen');
+const ctx      = canvas.getContext('2d');
+const noSignal = document.getElementById('no-signal');
+const evLog    = document.getElementById('event-log');
+const wsBadge  = document.getElementById('ws-badge');
+const camBadge = document.getElementById('cam-badge');
+
+/* ── 통계 ── */
+let frameCount = 0;
+let fpsTimer   = Date.now();
+let recvTs     = 0;
+
+setInterval(() => {
+  const elapsed = (Date.now() - fpsTimer) / 1000;
+  document.getElementById('fps-val').textContent =
+    elapsed > 0 ? (frameCount / elapsed).toFixed(1) : '—';
+  frameCount = 0;
+  fpsTimer   = Date.now();
+}, 1000);
+
+/* ── 이벤트 로그 추가 ── */
+function addEvent(cls, text) {
+  const now = new Date().toLocaleTimeString();
+  const div = document.createElement('div');
+  div.className = `ev ${cls}`;
+  div.innerHTML = `<div>${text}</div><div class="time">${now}</div>`;
+  evLog.prepend(div);
+  if (evLog.children.length > 80)
+    evLog.removeChild(evLog.lastChild);
+}
+
+/* ── JPEG binary → canvas 렌더링 ──
+   img 태그 방식 대비 장점:
+   - createImageBitmap: GPU 디코딩, 메인 스레드 블로킹 없음
+   - bitmap.close(): 즉시 메모리 해제, GC 압박 없음
+   - 이전 프레임이 남아있어서 끊기는 느낌 없음 ── */
+async function renderFrame(arrayBuffer) {
+  const t0 = performance.now();
+  try {
+    const blob   = new Blob([arrayBuffer], { type: 'image/jpeg' });
+    const bitmap = await createImageBitmap(blob);
+
+    /* canvas 크기가 다르면 맞춤 */
+    if (canvas.width  !== bitmap.width ||
+        canvas.height !== bitmap.height) {
+      canvas.width  = bitmap.width;
+      canvas.height = bitmap.height;
+    }
+
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();   /* 즉시 해제 */
+
+    noSignal.style.display = 'none';
+    canvas.style.display   = 'block';
+
+    /* 통계 갱신 */
+    frameCount++;
+    document.getElementById('frame-cnt').textContent = frameCount;
+    document.getElementById('frame-size').textContent =
+      (arrayBuffer.byteLength / 1024).toFixed(1) + ' KB';
+    document.getElementById('latency').textContent =
+      (performance.now() - t0).toFixed(1) + ' ms';
+
+  } catch (e) {
+    console.warn('Frame decode error:', e);
+  }
+}
+
+/* ── WebSocket ── */
+function connect() {
+  const ws = new WebSocket(WS_URL);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    wsBadge.textContent = 'WS 연결됨';
+    wsBadge.className   = 'badge live';
+  };
+
+  ws.onmessage = ({ data }) => {
+    if (data instanceof ArrayBuffer) {
+      /* binary = JPEG 프레임 */
+      renderFrame(data);
+    } else {
+      /* text = JSON 이벤트 */
+      handleEvent(data);
+    }
+  };
+
+  ws.onclose = () => {
+    wsBadge.textContent = 'WS 끊김 — 재연결 중...';
+    wsBadge.className   = 'badge err';
+    setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+function handleEvent(json) {
+  let msg;
+  try { msg = JSON.parse(json); } catch { return; }
+
+  const cam  = msg.cam  || '?';
+  const type = msg.type || '';
+  const data = msg.data || {};
+
+  if (type === 'event' && data.event === 'motion') {
+    addEvent('motion', `[${cam}] 모션 감지`);
+  } else if (type === 'status') {
+    const isOnline = JSON.stringify(data).includes('online');
+    if (isOnline) {
+      addEvent('online',  `[${cam}] 온라인`);
+      camBadge.textContent = `${cam} LIVE`;
+      camBadge.className   = 'badge live';
+    } else {
+      addEvent('offline', `[${cam}] 오프라인`);
+      camBadge.textContent = `${cam} OFFLINE`;
+      camBadge.className   = 'badge err';
+      /* 오프라인 시 화면에 표시 */
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#444';
+      ctx.font = '20px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${cam} — 오프라인`, canvas.width/2, canvas.height/2);
+    }
+  }
+}
+
+connect();
+</script>
+</body>
+</html>
