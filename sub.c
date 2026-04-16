@@ -26,10 +26,8 @@
 
 /* ── 브로커 failover 목록 ────────────────────────────────────── */
 static const char *BROKERS[] = {
-    "localhost",       /* Edge C (로컬 Mosquitto) */
-    "192.168.1.101",   /* Core A */
-    "192.168.1.102",   /* Core B */
-    "192.168.1.103",   /* Core C */
+    "192.168.0.13",
+    "192.168.0.9"
 };
 #define BROKER_COUNT (int)(sizeof(BROKERS)/sizeof(BROKERS[0]))
 #define MQTT_PORT    1883

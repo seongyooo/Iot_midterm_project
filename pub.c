@@ -35,7 +35,9 @@
 
 /* ── 브로커 failover 목록 ────────────────────────────────────── */
 static const char *BROKERS[] = {
-     "localhost"
+     "192.168.0.7",
+     "192.168.0.11",
+     "192.168.0.13"
 };
 #define BROKER_COUNT  1
 #define MQTT_PORT     1883
