@@ -2,15 +2,15 @@ CC      = gcc
 CFLAGS  = -Wall -O2
 LDFLAGS = -lmosquitto -lpthread
 
-all: publisher subscriber_ws
+all: pub sub
 
-publisher: publisher.c
+pub: pub.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -lsqlite3
 
-subscriber_ws: subscriber_ws.c
+sub: sub.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -lws
 
 clean:
-	rm -f publisher subscriber_ws
+	rm -f pub sub
 
 .PHONY: all clean
